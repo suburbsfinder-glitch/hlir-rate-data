@@ -1,0 +1,116 @@
+{
+  "_readme": "Decisions are updated automatically by rba_update.py. meetings and avg_new_variable are edited by hand.",
+  "baseline_date": "2022-01-01",
+  "baseline_rate": 0.1,
+  "decisions": [
+    {
+      "date": "2022-05-03",
+      "change": 0.25,
+      "rate": 0.35
+    },
+    {
+      "date": "2022-06-07",
+      "change": 0.5,
+      "rate": 0.85
+    },
+    {
+      "date": "2022-07-05",
+      "change": 0.5,
+      "rate": 1.35
+    },
+    {
+      "date": "2022-08-02",
+      "change": 0.5,
+      "rate": 1.85
+    },
+    {
+      "date": "2022-09-06",
+      "change": 0.5,
+      "rate": 2.35
+    },
+    {
+      "date": "2022-10-04",
+      "change": 0.25,
+      "rate": 2.6
+    },
+    {
+      "date": "2022-11-01",
+      "change": 0.25,
+      "rate": 2.85
+    },
+    {
+      "date": "2022-12-06",
+      "change": 0.25,
+      "rate": 3.1
+    },
+    {
+      "date": "2023-02-07",
+      "change": 0.25,
+      "rate": 3.35
+    },
+    {
+      "date": "2023-03-07",
+      "change": 0.25,
+      "rate": 3.6
+    },
+    {
+      "date": "2023-05-02",
+      "change": 0.25,
+      "rate": 3.85
+    },
+    {
+      "date": "2023-06-06",
+      "change": 0.25,
+      "rate": 4.1
+    },
+    {
+      "date": "2023-11-07",
+      "change": 0.25,
+      "rate": 4.35
+    },
+    {
+      "date": "2025-02-18",
+      "change": -0.25,
+      "rate": 4.1
+    },
+    {
+      "date": "2025-05-20",
+      "change": -0.25,
+      "rate": 3.85
+    },
+    {
+      "date": "2025-08-12",
+      "change": -0.25,
+      "rate": 3.6
+    },
+    {
+      "date": "2026-02-03",
+      "change": 0.25,
+      "rate": 3.85
+    },
+    {
+      "date": "2026-03-17",
+      "change": 0.25,
+      "rate": 4.1
+    },
+    {
+      "date": "2026-05-05",
+      "change": 0.25,
+      "rate": 4.35
+    },
+    {
+      "date": "2026-09-29",
+      "change": 0.25,
+      "rate": 4.6
+    }
+  ],
+  "meetings": [
+    "2026-11-03"
+  ],
+  "meetings_note": "RBA decision dates (the Tuesday the Board announces). Add the December 2026 date and next year's dates from rba.gov.au once confirmed.",
+  "avg_new_variable": {
+    "value": 6.24,
+    "note": "Owner occupier, September 2026"
+  },
+  "avg_new_variable_note": "Edited by hand. Carried over from the live site, check where this figure comes from and whether it predates the 29 September rise."
+}
