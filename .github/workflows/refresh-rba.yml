@@ -1,0 +1,37 @@
+name: Refresh RBA Cash Rate Data
+
+# The RBA announces at 2:30pm AEST/AEDT, which is about 03:30-04:30 UTC.
+# Two runs a day catch a decision the same afternoon or the next morning.
+on:
+  schedule:
+    - cron: '15 5 * * *'
+    - cron: '15 20 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: data-commits
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install requests
+
+      # Exits non-zero (and the run shows as failed, GitHub emails you) if the RBA
+      # data can't be read or doesn't chain correctly. rba-data.json is left alone.
+      - run: python rba_update.py --file rba-data.json
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update RBA cash rate decisions"
+          file_pattern: rba-data.json

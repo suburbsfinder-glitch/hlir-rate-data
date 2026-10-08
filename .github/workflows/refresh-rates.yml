@@ -3,10 +3,14 @@ name: Refresh CDR Rates
 on:
   schedule:
     - cron: '0 */6 * * *'   # every 6 hours
-  workflow_dispatch: {}      # lets you click "Run workflow" manually
+  workflow_dispatch: {}      # lets you click "Run workflow" manually on GitHub too
 
 permissions:
-  contents: write            # lets the workflow commit rates.json back to the repo
+  contents: write            # needed to commit rates.json back to the repo
+
+concurrency:
+  group: data-commits        # the rates and RBA workflows never push at the same moment
+  cancel-in-progress: false
 
 jobs:
   refresh:
