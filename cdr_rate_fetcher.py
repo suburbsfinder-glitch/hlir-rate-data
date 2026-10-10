@@ -27,20 +27,40 @@ from datetime import datetime, timezone
 
 import requests
 
-CDR_REGISTER_URL = "https://api.cdr.gov.au/cdr-register/v1/banking/data-holders/brands"
-CDR_API_VERSION = "3"          # x-v header, per Consumer Data Standards
-REQUEST_TIMEOUT = 15           # seconds, per-bank call
+# Public register endpoint. The plain ".../data-holders/brands" endpoint is
+# for accredited recipients only (mTLS + token) and fails for everyone else.
+CDR_REGISTER_URL = "https://api.cdr.gov.au/cdr-register/v1/banking/data-holders/brands/summary"
+
+# Version negotiation (Consumer Data Standards): each server answers with the
+# highest version it supports between x-min-v and x-v, so one outdated version
+# number can't make a bank refuse the request.
+REGISTER_HEADERS = {"x-v": "2", "x-min-v": "1", "Accept": "application/json"}
+PRODUCT_LIST_HEADERS = {"x-v": "4", "x-min-v": "1", "Accept": "application/json"}
+PRODUCT_DETAIL_HEADERS = {"x-v": "7", "x-min-v": "1", "Accept": "application/json"}
+
+REQUEST_TIMEOUT = 15           # seconds, per call
 POLITENESS_DELAY = 0.5         # seconds between banks, be a good citizen
+MAX_PAGES = 50                 # safety stop for product-list pagination
 PRODUCT_CATEGORY = "RESIDENTIAL_MORTGAGES"
 
 # Only plain fixed and variable rates go in the table. CDR also publishes
 # discount, introductory and penalty rate entries that aren't a loan's rate.
 KEEP_RATE_TYPES = {"FIXED", "VARIABLE"}
 
+# CDR featureType values (Consumer Data Standards enum) -> table labels.
+FEATURE_LABELS = {
+    "OFFSET": "Offset",
+    "REDRAW": "Redraw",
+    "EXTRA_REPAYMENTS": "Extra repayments",
+}
+
 STAFF_NAME = re.compile(r"\b(staff|employees?|team members?)\b", re.I)
 _ISO_DURATION = re.compile(r"^P(?:(\d+)Y)?(?:(\d+)M)?$")
 _TEXT_YEARS = re.compile(r"\b(\d{1,2})\s*[- ]?\s*(?:years?|yrs?|y)\b", re.I)
 _TEXT_MONTHS = re.compile(r"\b(\d{1,3})\s*[- ]?\s*(?:months?|mths?|mo)\b", re.I)
+
+session = requests.Session()
+session.headers.update({"User-Agent": "hlir-rate-fetcher/1.2"})
 
 
 def normalise_period(value):
@@ -84,6 +104,22 @@ def fixed_period(rate, product_name):
         or normalise_period(rate.get("period"))
         or period_from_text(rate.get("additionalInfo"), product_name)
     )
+
+
+def max_lvr_from_tiers(tiers):
+    """Maximum LVR as a whole percentage (80, not 0.8). Banks name the tier
+    'LVR', 'lvr', 'Loan to Value Ratio' etc., so match loosely."""
+    for tier in tiers or []:
+        name = (tier.get("name") or "").lower()
+        if "lvr" in name or "loan to value" in name or "loan-to-value" in name:
+            try:
+                value = float(tier.get("maximumValue"))
+            except (TypeError, ValueError):
+                return None
+            if 0 < value <= 1:
+                value *= 100
+            return round(value)
+    return None
 
 
 def exclusion_reason(summary, detail):
@@ -131,16 +167,18 @@ def get_banking_data_holders():
     from the official CDR Register. This list changes as banks join
     CDR or update infrastructure, so always fetch it fresh rather
     than hardcoding it."""
-    resp = requests.get(CDR_REGISTER_URL, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    resp = session.get(CDR_REGISTER_URL, headers=REGISTER_HEADERS, timeout=REQUEST_TIMEOUT)
+    if resp.status_code != 200:
+        raise RuntimeError(f"CDR Register returned HTTP {resp.status_code}: {resp.text[:300]}")
     data = resp.json()
 
-    holders = []
+    holders, seen = [], set()
     for entry in data.get("data", []):
         brand_name = entry.get("brandName") or entry.get("legalEntityName")
-        base_uri = entry.get("publicBaseUri")
-        if brand_name and base_uri:
-            holders.append({"brand_name": brand_name, "base_uri": base_uri.rstrip("/")})
+        base_uri = (entry.get("publicBaseUri") or "").rstrip("/")
+        if brand_name and base_uri and base_uri not in seen:
+            seen.add(base_uri)
+            holders.append({"brand_name": brand_name, "base_uri": base_uri})
     return holders
 
 
@@ -150,26 +188,25 @@ def get_home_loan_products(base_uri):
     products = []
     url = f"{base_uri}/cds-au/v1/banking/products"
     params = {"product-category": PRODUCT_CATEGORY, "page-size": 100, "effective": "CURRENT"}
-    headers = {"x-v": CDR_API_VERSION, "Accept": "application/json"}
+    pages = 0
 
-    while url:
-        resp = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+    while url and pages < MAX_PAGES:
+        resp = session.get(url, params=params, headers=PRODUCT_LIST_HEADERS, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
         body = resp.json()
         products.extend(body.get("data", {}).get("products", []))
-
-        next_url = body.get("links", {}).get("next")
-        url = next_url
+        url = body.get("links", {}).get("next")
         params = None  # next_url already has query params baked in
+        pages += 1
 
-    return products
+    # Some banks ignore the category filter, so check it again here.
+    return [p for p in products if p.get("productCategory", PRODUCT_CATEGORY) == PRODUCT_CATEGORY]
 
 
 def get_product_detail(base_uri, product_id):
     """Fetch full detail, lending rates, fees, eligibility, for one product."""
     url = f"{base_uri}/cds-au/v1/banking/products/{product_id}"
-    headers = {"x-v": CDR_API_VERSION, "Accept": "application/json"}
-    resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+    resp = session.get(url, headers=PRODUCT_DETAIL_HEADERS, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     return resp.json().get("data", {})
 
@@ -180,51 +217,44 @@ def normalize_product(brand_name, summary, detail):
     product (e.g. different LVR tiers), so this yields one row per
     rate tier rather than one row per product."""
     rows = []
-    lending_rates = detail.get("lendingRates", [])
-    fees = detail.get("fees", [])
+    name = summary.get("name") or detail.get("name")
+    fees = detail.get("fees", []) or []
     fee_summary = ", ".join(
-        f["name"] for f in fees if f.get("amount") not in (None, "0", 0)
+        f["name"] for f in fees if f.get("name") and f.get("amount") not in (None, "0", "0.00", 0)
     ) or "No ongoing fees listed"
 
-    # Friendly labels for CDR's featureType enum, only kept if present.
-    feature_labels = {
-        "OFFSET": "Offset",
-        "REDRAW_FACILITY": "Redraw",
-        "ADDITIONAL_REPAYMENTS": "Extra repayments",
-        "SPLIT_ACCOUNT_FACILITY": "Split facility",
-        "INTEREST_ONLY_REPAYMENT": "Interest only option",
-    }
-    features = [
-        feature_labels.get(f.get("featureType"), f.get("featureType"))
-        for f in detail.get("features", [])
-        if f.get("featureType") in feature_labels
-    ]
-    is_refinance_named = "refinanc" in (summary.get("name") or "").lower()
+    features = []
+    for f in detail.get("features", []) or []:
+        label = FEATURE_LABELS.get(f.get("featureType"))
+        if label and label not in features:
+            features.append(label)
 
-    for rate in lending_rates:
+    is_refinance_named = "refinanc" in (name or "").lower()
+
+    for rate in detail.get("lendingRates", []) or []:
         if (rate.get("lendingRateType") or "").upper() not in KEEP_RATE_TYPES:
+            continue
+        # The site only shows rates that have both an interest and a comparison
+        # rate, so skip the rest here to keep rates.json small.
+        if not rate.get("rate") or not rate.get("comparisonRate"):
             continue
         rows.append({
             "lender": brand_name,
-            "product_name": summary.get("name"),
+            "product_name": name,
             "product_id": summary.get("productId"),
             "rate_type": rate.get("lendingRateType"),          # FIXED / VARIABLE
             "loan_purpose": rate.get("loanPurpose"),            # OWNER_OCCUPIED / INVESTMENT
             "repayment_type": rate.get("repaymentType"),        # PRINCIPAL_AND_INTEREST / INTEREST_ONLY
-            "period": fixed_period(rate, summary.get("name")),  # "P3Y" etc, fixed-rate term, None if variable
+            "period": fixed_period(rate, name),                 # "P3Y" etc, fixed-rate term, None if variable
             "interest_rate": rate.get("rate"),
             "comparison_rate": rate.get("comparisonRate"),
-            "max_lvr": next(
-                (t.get("maximumValue") for t in rate.get("tiers", []) if t.get("name") == "lvr"),
-                None,
-            ),
+            "max_lvr": max_lvr_from_tiers(rate.get("tiers")),
             "fees_summary": fee_summary,
             "features": features,
             # Heuristic only: CDR has no "refinance" loan purpose, this just
             # flags products whose own name mentions it, e.g. "... Refinance Offer".
             "is_refinance_named": is_refinance_named,
             "last_updated": detail.get("lastUpdated"),
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
         })
     return rows
 
@@ -263,11 +293,11 @@ def run(output_path, limit=None, inspect=0):
                         continue
                     all_rows.extend(normalize_product(brand, summary, detail))
                 except Exception as e:
-                    failures.append({"brand": brand, "product_id": summary.get("productId"), "error": str(e)})
+                    failures.append({"brand": brand, "product_id": summary.get("productId"), "error": str(e)[:200]})
             print(f"  {brand}: {len(products)} home loan products")
         except Exception as e:
-            failures.append({"brand": brand, "error": str(e)})
-            print(f"  {brand}: FAILED ({e})")
+            failures.append({"brand": brand, "error": str(e)[:200]})
+            print(f"  {brand}: FAILED ({str(e)[:150]})")
 
         if inspect and inspected >= inspect:
             break
@@ -276,6 +306,10 @@ def run(output_path, limit=None, inspect=0):
     if inspect:
         print(f"\nInspected {inspected} fixed-rate entries. Nothing written.")
         return
+
+    if not all_rows:
+        # Don't replace a good rates.json with an empty one.
+        raise RuntimeError(f"No rate rows collected ({len(failures)} failures). rates.json not written.")
 
     raw_count = len(all_rows)
     rows = collapse_rows(all_rows)
@@ -297,7 +331,8 @@ def run(output_path, limit=None, inspect=0):
 
     fixed_rows = [r for r in rows if r["rate_type"] == "FIXED"]
     with_term = [r for r in fixed_rows if r["period"]]
-    print(f"\nDone. {len(rows)} rate rows written to {output_path} ({raw_count - len(rows)} duplicates merged).")
+    print(f"\nDone. {len(rows)} rate rows from {output['lender_count']} lenders written to {output_path} "
+          f"({raw_count - len(rows)} duplicates merged).")
     print(f"Fixed-rate rows with a term: {len(with_term)} of {len(fixed_rows)}")
     if excluded:
         print(f"{len(excluded)} products excluded (staff-only), see 'excluded' in the output file.")
