@@ -31,12 +31,15 @@ import requests
 # for accredited recipients only (mTLS + token) and fails for everyone else.
 CDR_REGISTER_URL = "https://api.cdr.gov.au/cdr-register/v1/banking/data-holders/brands/summary"
 
-# Version negotiation (Consumer Data Standards): each server answers with the
-# highest version it supports between x-min-v and x-v, so one outdated version
-# number can't make a bank refuse the request.
+# Version negotiation (Consumer Data Standards). Servers are meant to answer
+# with the highest version they support between x-min-v and x-v, but many
+# (Westpac, ANZ, St.George, BOQ...) reply "406 Not Acceptable" when x-v is
+# above their maximum. So each call tries the newest version first and steps
+# down on a 406, and remembers what worked for each bank.
 REGISTER_HEADERS = {"x-v": "2", "x-min-v": "1", "Accept": "application/json"}
-PRODUCT_LIST_HEADERS = {"x-v": "4", "x-min-v": "1", "Accept": "application/json"}
-PRODUCT_DETAIL_HEADERS = {"x-v": "7", "x-min-v": "1", "Accept": "application/json"}
+PRODUCT_LIST_VERSIONS = [4, 3, 2, 1]
+PRODUCT_DETAIL_VERSIONS = [7, 6, 5, 4, 3, 2, 1]
+_working_version = {}   # (base_uri, endpoint) -> version that last succeeded
 
 REQUEST_TIMEOUT = 15           # seconds, per call
 POLITENESS_DELAY = 0.5         # seconds between banks, be a good citizen
@@ -182,6 +185,32 @@ def get_banking_data_holders():
     return holders
 
 
+def cdr_get(base_uri, endpoint, url, versions, params=None):
+    """GET a CDR endpoint, stepping down through API versions on 406 and
+    retrying once on a temporary server error (5xx)."""
+    key = (base_uri, endpoint)
+    order = versions
+    if key in _working_version:
+        known = _working_version[key]
+        order = [known] + [v for v in versions if v != known]
+
+    last = None
+    for v in order:
+        headers = {"x-v": str(v), "x-min-v": "1", "Accept": "application/json"}
+        for attempt in range(2):
+            resp = session.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code < 500:
+                break
+            time.sleep(2)
+        last = resp
+        if resp.status_code == 406:
+            continue
+        resp.raise_for_status()
+        _working_version[key] = v
+        return resp.json()
+    last.raise_for_status()
+
+
 def get_home_loan_products(base_uri):
     """List current residential mortgage products for one bank,
     following CDR pagination (links.next) until exhausted."""
@@ -191,9 +220,7 @@ def get_home_loan_products(base_uri):
     pages = 0
 
     while url and pages < MAX_PAGES:
-        resp = session.get(url, params=params, headers=PRODUCT_LIST_HEADERS, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        body = resp.json()
+        body = cdr_get(base_uri, "list", url, PRODUCT_LIST_VERSIONS, params)
         products.extend(body.get("data", {}).get("products", []))
         url = body.get("links", {}).get("next")
         params = None  # next_url already has query params baked in
@@ -206,9 +233,7 @@ def get_home_loan_products(base_uri):
 def get_product_detail(base_uri, product_id):
     """Fetch full detail, lending rates, fees, eligibility, for one product."""
     url = f"{base_uri}/cds-au/v1/banking/products/{product_id}"
-    resp = session.get(url, headers=PRODUCT_DETAIL_HEADERS, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    return resp.json().get("data", {})
+    return cdr_get(base_uri, "detail", url, PRODUCT_DETAIL_VERSIONS).get("data", {})
 
 
 def normalize_product(brand_name, summary, detail):
