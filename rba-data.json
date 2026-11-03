@@ -102,6 +102,11 @@
       "date": "2026-09-29",
       "change": 0.25,
       "rate": 4.6
+    },
+    {
+      "date": "2026-11-03",
+      "change": 0.25,
+      "rate": 4.85
     }
   ],
   "meetings": [
@@ -112,5 +117,6 @@
     "value": 6.24,
     "note": "Owner occupier, September 2026"
   },
-  "avg_new_variable_note": "Edited by hand. Carried over from the live site, check where this figure comes from and whether it predates the 29 September rise."
+  "avg_new_variable_note": "Edited by hand. Carried over from the live site, check where this figure comes from and whether it predates the 29 September rise.",
+  "updated_at": "2026-11-03T08:03:56.832221+00:00"
 }
